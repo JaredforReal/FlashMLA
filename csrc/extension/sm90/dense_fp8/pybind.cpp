@@ -1,5 +1,7 @@
-#include <torch/extension.h>
-#include <torch/nn/functional.h>
+// Note: Avoid <torch/extension.h> as it pulls in pybind11 internals that
+// use _PyThreadState_UncheckedGet, which is not in the stable ABI and was
+// removed in Python 3.13.
+#include <torch/torch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cutlass/fast_math.h>

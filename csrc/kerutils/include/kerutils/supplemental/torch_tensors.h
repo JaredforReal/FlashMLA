@@ -2,7 +2,10 @@
 
 #include <functional>
 
-#include <torch/python.h>
+// Note: Avoid <torch/python.h> as it pulls in pybind11 internals that
+// use _PyThreadState_UncheckedGet, which is not in the stable ABI and was
+// removed in Python 3.13.
+#include <torch/torch.h>
 
 #include "kerutils/common/common.h"
 

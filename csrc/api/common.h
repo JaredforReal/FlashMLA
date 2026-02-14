@@ -2,7 +2,10 @@
 
 #include <span>
 
-#include <torch/extension.h>
+// Note: Avoid <torch/extension.h> as it pulls in pybind11 internals that
+// use _PyThreadState_UncheckedGet, which is not in the stable ABI and was
+// removed in Python 3.13. Use specific headers instead.
+#include <torch/torch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <kerutils/supplemental/torch_tensors.h>
