@@ -168,6 +168,14 @@ struct SparseAttnFwdParams {
 
     int num_sm;
     cudaStream_t stream;
+
+    // Optional per-head-group key mask for "grouped" sparse prefill, where the
+    // h_q heads are G consecutive tokens x (h_q/G) real heads sharing one
+    // (union) index list: [s_q, topk/128, 128 bytes]; bit j of the 16-byte
+    // word for head-group g says whether key column j of that 128-key block
+    // is attendable by heads [g*hg, (g+1)*hg). nullptr = no extra masking.
+    const uint8_t* __restrict__ head_group_mask;
+    int log2_head_group_size;
 };
 
 // We have some kernels that implement both prefill and decode modes in a single kernel (with different template instantiations). The following enum helps to distinguish the modes.

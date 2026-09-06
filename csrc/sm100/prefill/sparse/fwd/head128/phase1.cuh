@@ -207,6 +207,13 @@ KernelTemplate<D_QK>::sparse_attn_fwd_kernel_devfunc(const SparseAttnFwdParams &
             // here, NVCC won't use R2P.
             uint32_t is_k_valid_lo = *(uint32_t*)(plan.is_k_valid[k%NUM_BUFS] + (idx_in_warpgroup>=64?B_TOPK/8/2:0));
             uint32_t is_k_valid_hi = *(uint32_t*)(plan.is_k_valid[k%NUM_BUFS] + (idx_in_warpgroup>=64?B_TOPK/8/2:0) + 4);
+            if (params.head_group_mask != nullptr) {
+                // This thread owns head (cta_idx*64 + row); mask its key columns by head group.
+                const int hg = (cta_idx*(B_H/2) + (idx_in_warpgroup%64)) >> params.log2_head_group_size;
+                const char* hg_base = plan.hg_mask[k%NUM_BUFS][hg] + (idx_in_warpgroup>=64?B_TOPK/8/2:0);
+                is_k_valid_lo &= *(uint32_t*)(hg_base);
+                is_k_valid_hi &= *(uint32_t*)(hg_base + 4);
+            }
             float* p_float = (float*)p;
             CUTE_UNROLL
             for (int i = 0; i < (B_TOPK/2)/2; i += 1) {
@@ -617,8 +624,18 @@ KernelTemplate<D_QK>::sparse_attn_fwd_kernel_devfunc(const SparseAttnFwdParams &
                         is_valid(1, indices.a1) << 1 |
                         is_valid(0, indices.a0) << 0;
 
+                    uint2 hg_bits = make_uint2(0u, 0u);
+                    if (params.head_group_mask != nullptr) {
+                        // 8 groups x 16 bytes per (s_q row, 128-key block); lane l copies bytes [8l, 8l+8).
+                        const size_t blk = (size_t)s_q_idx * (params.topk / B_TOPK) + k;
+                        hg_bits = __ldg((const uint2*)(params.head_group_mask + blk * (8 * B_TOPK/8)) + lane_idx);
+                    }
+
                     plan.bar_k_valid_free[cur_buf].wait((k/NUM_BUFS)&1^1);
                     plan.is_k_valid[cur_buf][lane_idx] = is_ks_valid_mask;
+                    if (params.head_group_mask != nullptr) {
+                        *(uint2*)(&plan.hg_mask[cur_buf][0][0] + lane_idx * 8) = hg_bits;
+                    }
                     plan.bar_k_valid_ready[cur_buf].arrive();
                 }
             }

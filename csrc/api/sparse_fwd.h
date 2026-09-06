@@ -18,7 +18,8 @@ enum class FwdFeatures : int {
 
     ATTN_SINK,
     SINK_LSE,
-    TOPK_LENGTH
+    TOPK_LENGTH,
+    HEAD_GROUP_MASK
 };
 
 class FwdImplBase : public ImplBase<
@@ -72,7 +73,8 @@ class Fwd_Sm100_Head128_Impl : public FwdImplBase {
         FwdFeatures::HEAD_DIM_576,
         FwdFeatures::ATTN_SINK,
         FwdFeatures::SINK_LSE,
-        FwdFeatures::TOPK_LENGTH
+        FwdFeatures::TOPK_LENGTH,
+        FwdFeatures::HEAD_GROUP_MASK
     )
 
 protected:
@@ -106,7 +108,9 @@ static std::vector<Tensor> sparse_attn_prefill_interface(
     int64_t d_v,
     const std::optional<Tensor> &attn_sink,
     const std::optional<Tensor> &topk_length,
-    const std::optional<Tensor> &out_
+    const std::optional<Tensor> &out_,
+    const std::optional<Tensor> &head_group_mask,
+    int64_t head_group_size
 ) {
     using bf16 = cutlass::bfloat16_t;
     
@@ -175,6 +179,20 @@ static std::vector<Tensor> sparse_attn_prefill_interface(
     KU_CHECK_CONTIGUOUS(lse);
     KU_CHECK_CONTIGUOUS(max_logits);
 
+    int log2_head_group_size = 0;
+    if (head_group_mask.has_value()) {
+        STD_TORCH_CHECK(h_q == 128 && is_sm100f, "head_group_mask requires h_q == 128 on SM100");
+        STD_TORCH_CHECK(head_group_size > 0 && (head_group_size & (head_group_size - 1)) == 0
+            && h_q % head_group_size == 0 && h_q / head_group_size <= 8,
+            "head_group_size must be a power of two with at most 8 groups per 128 heads");
+        while ((1 << log2_head_group_size) < head_group_size) ++log2_head_group_size;
+        KU_CHECK_NDIM(head_group_mask, 3);
+        KU_CHECK_DEVICE(head_group_mask);
+        KU_CHECK_DTYPE(head_group_mask, ScalarType::Byte);
+        KU_CHECK_SHAPE(head_group_mask, s_q, topk / 128, 128);
+        KU_CHECK_CONTIGUOUS(head_group_mask);
+    }
+
     SparseAttnFwdParams params = {
         s_q, s_kv, h_q, h_kv, d_qk, d_v, topk,
         sm_scale, sm_scale * LOG_2_E,
@@ -194,7 +212,9 @@ static std::vector<Tensor> sparse_attn_prefill_interface(
         (float*)lse.data_ptr(),
 
         arch.num_sms,
-        get_current_cuda_stream(q)
+        get_current_cuda_stream(q),
+        ku::get_optional_tensor_ptr<uint8_t>(head_group_mask),
+        log2_head_group_size
     };
 
     std::vector<FwdFeatures> required_features;
@@ -217,6 +237,9 @@ static std::vector<Tensor> sparse_attn_prefill_interface(
     }
     if (have_topk_length) {
         required_features.push_back(FwdFeatures::TOPK_LENGTH);
+    }
+    if (head_group_mask.has_value()) {
+        required_features.push_back(FwdFeatures::HEAD_GROUP_MASK);
     }
 
     if (is_sm90a) {

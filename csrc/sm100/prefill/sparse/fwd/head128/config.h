@@ -105,6 +105,7 @@ struct SharedMemoryPlan {
     array_aligned<bf16, cosize_v<SmemLayoutSTiles<2>>> s;
     float p[(B_H/2)*B_TOPK];
     char is_k_valid[NUM_BUFS][B_TOPK/8];
+    alignas(16) char hg_mask[NUM_BUFS][8][B_TOPK/8];   // per head-group key mask (see SparseAttnFwdParams::head_group_mask)
     transac_bar_t bar_prologue_q, bar_prologue_utccp;
     transac_bar_t bar_qk_part_done[NUM_BUFS], bar_qk_done[NUM_BUFS];    // Pi = QKi^T done (i.e. Ki free)
     transac_bar_t bar_sv_part_done[NUM_BUFS], bar_sv_done[NUM_BUFS];    // O += SiVi done (i.e. Vi free)
