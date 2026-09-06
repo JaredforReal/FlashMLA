@@ -193,6 +193,8 @@ def flash_mla_sparse_fwd(
     attn_sink: Optional[torch.Tensor] = None,
     topk_length: Optional[torch.Tensor] = None,
     out: Optional[torch.Tensor] = None,
+    head_group_mask: Optional[torch.Tensor] = None,
+    head_group_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Sparse attention prefill kernel
@@ -210,6 +212,11 @@ def flash_mla_sparse_fwd(
         topk_length: optional, [s_q], int32. If provided, the i-th q token will only attend to k tokens specified by indices[i, :, :topk_length[i]], ignoring later k/v tokens (even if provided in indices).
             In extremely rare cases (topk_length provided, there is a valid topk index between topk_length[i] ~ s_kv, and that topk index points to a k token containing NaN), operator output will contain NaN, so please avoid this situation.
         out: optional pre-allocated output tensor with shape [s_q, h_q, d_v], bfloat16, contiguous on the last dim. If provided, the result will be written into this buffer to avoid allocation.
+        head_group_mask: optional, [s_q, topk // 128, 128], uint8 (SM100, h_q == 128 only). "Grouped" sparse prefill: the
+            h_q heads of one q row are h_q / head_group_size consecutive tokens x head_group_size real heads sharing one
+            (union) index list; for key block b, bytes [16*g, 16*g+16) hold a 128-bit mask whose bit j says whether key
+            indices[b*128 + j] is attendable by head group g. Masked keys behave like invalid indices.
+        head_group_size: heads per group for head_group_mask (power of two, h_q // head_group_size <= 8).
 
     Returns:
         (output, max_logits, lse)
@@ -219,7 +226,8 @@ def flash_mla_sparse_fwd(
         - lse: [s_q, h_q], float, log-sum-exp of attention scores
     """
     results = flash_mla_cuda.sparse_prefill_fwd(
-        q, kv, indices, sm_scale, d_v, attn_sink, topk_length, out
+        q, kv, indices, sm_scale, d_v, attn_sink, topk_length, out,
+        head_group_mask, head_group_size,
     )
     return results
 
