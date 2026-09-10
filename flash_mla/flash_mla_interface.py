@@ -70,7 +70,7 @@ def flash_mla_with_kvcache(
     extra_indices_in_kvcache: Optional[torch.Tensor] = None,
     topk_length: Optional[torch.Tensor] = None,
     extra_topk_length: Optional[torch.Tensor] = None,
-    out: Optional[torch.Tensor] = None
+    out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
@@ -93,7 +93,7 @@ def flash_mla_with_kvcache(
         extra_k_cache and extra_indices_in_kvcache: If provided, will attend to these extra tokens in addition to those in k_cache and indices_in_kvcache. Their format requirements are the same as k_cache and indices_in_kvcache respectively.
         topk_length/extra_topk_length: (batch_size, ), torch.int32. If provided, only the leftmost topk_length indices will be processed. Useful when the actual topk for different queries are different so that we can save some computation, compared to masking.
         out: Optional pre-allocated output tensor with shape (batch_size, seq_len_q, num_heads_q, head_dim_v), same dtype as q, and contiguous. If provided, the result will be written into this buffer to avoid allocation. For dense attention, only num_heads_k == 1 (MLA) is supported.
-
+    
     For DeepSeek V3, DeepSeek V3.1, and DeepSeek V3.2:
         head_dim should be 576 while head_dim_v should be 512.
         In FP8+sparse mode, each token's KV cache is 656 Bytes, structured as:
@@ -106,6 +106,15 @@ def flash_mla_with_kvcache(
             - First 256 bytes: The "quantized NoPE" part, containing 512 float4_e2m1 values.
             - Next 64 bytes: The "RoPE" part, containing 64 float8_e4m3 values. This part is not scaled.
             - Last 32 bytes: Scale factors for the NoPE part, containing 32 float8_e4m3 values, one per 16 float4_e2m1 values.
+
+    For DeepSeek V4 and DeepSeek V4.1:
+        head_dim should be 512 while head_dim_v should be 512.
+        In FP8+sparse mode, the format is detected from the last dimension of `k_cache` (i.e. the bytes per token): 584 (V4), 528 (V4.1) or 288 (V4.1 with an fp4 extra cache).
+        In all three, a page block stores `page_block_size` data rows first and `page_block_size` scale rows afterwards, so the scale factors are not interleaved into the data rows:
+            - V4 (584 Bytes per token): the data row is 448 float8_e4m3 NoPE values followed by 64 bfloat16 RoPE values (not quantized); the scale row is 8 Bytes, of which the first 7 are float8_e8m0 scales (the 8th byte is padding), each covering 64 consecutive float8_e4m3 values of the NoPE part.
+            - V4.1 (528 Bytes per token): the data row is 512 float8_e4m3 values (the 64 RoPE dimensions are quantized as well, so there is no bfloat16 part); the scale row is 16 Bytes of float8_e8m0 scales, each covering 32 consecutive float8_e4m3 values.
+            - V4.1 fp4 (288 Bytes per token): only valid for `extra_k_cache`, and only when `k_cache` is in the V4.1 format; the data row is 256 Bytes containing 512 e2m1 values (2 values per byte, the even-indexed one in the low nibble), and the scale row is 32 Bytes of float8_e4m3 scales, each covering 16 consecutive e2m1 values.
+        See tests/quant.py for quantization and dequantization details.
 
     Return:
         out: (batch_size, seq_len_q, num_heads_q, head_dim_v).

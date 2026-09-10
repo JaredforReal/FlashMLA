@@ -21,6 +21,8 @@
 
 #include <cutlass/bfloat16.h>
 
+#include "kernels/kv_cache_format.h"
+
 using torch::stable::Tensor;
 using torch::headeronly::ScalarType;
 
@@ -103,23 +105,11 @@ inline int int64_stride_to_int(int64_t orig_stride) {
     if (MODEL_TYPE == ModelType::V32) { \
         static constexpr ModelType CONSTEXPR_NAME = ModelType::V32; \
         return __VA_ARGS__(); \
-    } else if (MODEL_TYPE == ModelType::MODEL1) { \
-        static constexpr ModelType CONSTEXPR_NAME = ModelType::MODEL1; \
+    } else if (MODEL_TYPE == ModelType::V4) { \
+        static constexpr ModelType CONSTEXPR_NAME = ModelType::V4; \
         return __VA_ARGS__(); \
     } else { \
         STD_TORCH_CHECK(false, "Unsupported model type: ", (int)MODEL_TYPE); \
-    } \
-} ();
-
-// Like DISPATCH_MODEL_TYPE, but also covers the NVFP4 format (SM100-only kernel).
-// Kept separate so that SM90 kernel templates are never instantiated for NVFP4.
-#define DISPATCH_MODEL_TYPE_SM100(MODEL_TYPE, CONSTEXPR_NAME, ...) \
-[&] () { \
-    if (MODEL_TYPE == ModelType::V32_NVFP4_FP8ROPE) { \
-        static constexpr ModelType CONSTEXPR_NAME = ModelType::V32_NVFP4_FP8ROPE; \
-        return __VA_ARGS__(); \
-    } else { \
-        return DISPATCH_MODEL_TYPE(MODEL_TYPE, CONSTEXPR_NAME, __VA_ARGS__); \
     } \
 } ();
 
@@ -163,6 +153,42 @@ static constexpr std::string get_dynamic_enum_name(T value){
         };
     }(std::make_index_sequence<num>{});
     return (std::string)names[static_cast<std::size_t>(value)];
+}
+
+// =============================================
+// Paged quantized KV cache formats (decoding)
+// =============================================
+
+// V3.2 geometry has either the original 656-byte fp8/bf16 record or the
+// SM100-only 352-byte NVFP4-NoPE/fp8-RoPE record.
+inline ModelType detect_kv_cache_format_for_headdim_576(int bytes_per_token) {
+    for (ModelType mt : {ModelType::V32, ModelType::V32_NVFP4_FP8ROPE}) {
+        if (bytes_per_token == kv_cache_bytes_per_token(mt)) {
+            return mt;
+        }
+    }
+    STD_TORCH_CHECK(false, "Unsupported bytes_per_token for d_qk=576: ", bytes_per_token, ". Expected ",
+        kv_cache_bytes_per_token(ModelType::V32), " (V3.2 fp8) or ",
+        kv_cache_bytes_per_token(ModelType::V32_NVFP4_FP8ROPE), " (V3.2 NVFP4 NoPE + fp8 RoPE)");
+}
+
+// The format of a paged quantized KV cache with d_qk = 512 (V4 / V4.1 / V4.1 fp4), detected by bytes_per_token (kv.size(3))
+inline ModelType detect_kv_cache_format_for_headdim_512(int bytes_per_token) {
+    for (ModelType mt : {ModelType::V4, ModelType::V41, ModelType::V41_FP4}) {
+        if (bytes_per_token == kv_cache_bytes_per_token(mt)) {
+            return mt;
+        }
+    }
+    STD_TORCH_CHECK(false, "Unsupported bytes_per_token for d_qk=512: ", bytes_per_token, ". Expected ",
+        kv_cache_bytes_per_token(ModelType::V4), " (V4), ", kv_cache_bytes_per_token(ModelType::V41), " (V4.1) or ",
+        kv_cache_bytes_per_token(ModelType::V41_FP4), " (V4.1 fp4)");
+}
+
+// Dispatches the runtime (kv, extra_kv) format pair
+template<typename... Pairs, typename Fn>
+inline void dispatch_kv_formats(KVFormatPairs<Pairs...>, ModelType kv, ModelType extra_kv, Fn &&fn) {
+    bool matched = ((kv == Pairs::kv && extra_kv == Pairs::extra_kv ? (fn.template operator()<Pairs::kv, Pairs::extra_kv>(), true) : false) || ...);
+    STD_TORCH_CHECK(matched, "Unsupported KV cache formats for this implementation: kv ", get_dynamic_enum_name(kv), ", extra_kv ", get_dynamic_enum_name(extra_kv));
 }
 
 // A shortcut macro to declare supported features in an implementation class.
